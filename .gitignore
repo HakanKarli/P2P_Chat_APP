@@ -1,0 +1,16 @@
+# Logs
+*.log
+p2p_ring_*.log
+
+# Chat History
+chat_history_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+test_*.py

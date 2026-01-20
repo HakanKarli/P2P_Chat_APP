@@ -1,0 +1,12 @@
+{
+  "bind_host": "0.0.0.0",
+  "tcp_port": 9001,
+  "udp_port": 9999,
+  "discovery_interval": 10.0,
+  "heartbeat_interval": 2.0,
+  "heartbeat_timeout": 6.0,
+  "election_delay": 5.0,
+  "reconnect_base": 1.0,
+  "reconnect_max": 10.0,
+  "log_level": "INFO"
+}
