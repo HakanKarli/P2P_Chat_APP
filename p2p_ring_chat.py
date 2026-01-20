@@ -48,7 +48,9 @@ class Config:
     log_level: str
 
 
+
 def load_config(path: Optional[str]) -> Optional[dict]:
+    """Load configuration from a JSON file."""
     if not path:
         return None
     try:
@@ -58,7 +60,9 @@ def load_config(path: Optional[str]) -> Optional[dict]:
         return None
 
 
+
 def get_local_ip() -> str:
+    """Determine the local IP address for advertising."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("10.255.255.255", 1))
@@ -82,19 +86,23 @@ def get_local_ip() -> str:
     return "127.0.0.1"
 
 
+
 def frame_message(payload: dict) -> bytes:
+    """Pack a dictionary payload into a length-prefixed binary frame."""
     data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     header = struct.pack("!I", len(data))
     return header + data
 
 
 class UdpThread(threading.Thread):
+    """Handles UDP socket operations for discovery and heartbeats."""
     def __init__(self, node: "Node"):
         super().__init__(daemon=True, name="UDP")
         self.node = node
         self.sock = self._setup_socket()
 
     def _setup_socket(self):
+        """Create and configure the UDP socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -103,6 +111,7 @@ class UdpThread(threading.Thread):
         return sock
 
     def run(self):
+        """Listen for incoming UDP packets and dispatch them."""
         self.node.logger.info("UDP listening on %s:%s", self.node.config.bind_host, self.node.config.udp_port)
         
         while not self.node.shutdown.is_set():
@@ -116,6 +125,7 @@ class UdpThread(threading.Thread):
                 continue
 
     def _handle_message(self, msg: dict, addr: Tuple[str, int]):
+        """Process a decoded UDP message based on its type."""
         msg_type = msg.get("type")
         node_key = msg.get("node_key")
 
@@ -140,12 +150,14 @@ class UdpThread(threading.Thread):
 
 
 class TcpListenerThread(threading.Thread):
+    """Listens for incoming TCP connections from other peers."""
     def __init__(self, node: "Node"):
         super().__init__(daemon=True, name="TCP-Listener")
         self.node = node
         self.sock = self._setup_socket()
 
     def _setup_socket(self):
+        """Create and configure the TCP server socket."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.node.config.bind_host, self.node.config.tcp_port))
@@ -154,6 +166,7 @@ class TcpListenerThread(threading.Thread):
         return sock
 
     def run(self):
+        """Accept new connections and spawn handler threads."""
         self.node.logger.info("TCP listening on %s:%s", self.node.config.bind_host, self.node.config.tcp_port)
         
         while not self.node.shutdown.is_set():
@@ -167,12 +180,14 @@ class TcpListenerThread(threading.Thread):
 
 
 class TcpHandlerThread(threading.Thread):
+    """Handles an active TCP connection with a neighbor."""
     def __init__(self, node: "Node", conn: socket.socket):
         super().__init__(daemon=True, name=f"TCP-Handler")
         self.node = node
         self.conn = conn
 
     def run(self):
+        """Continuous loop to read and process incoming frames."""
         try:
             while not self.node.shutdown.is_set():
                 msg = self._read_frame()
@@ -188,6 +203,7 @@ class TcpHandlerThread(threading.Thread):
                 pass
 
     def _read_frame(self) -> Optional[dict]:
+        """Read a single length-prefixed message frame."""
         try:
             header = self.conn.recv(4)
             if len(header) < 4:
@@ -206,6 +222,7 @@ class TcpHandlerThread(threading.Thread):
             return None
 
     def _handle_message(self, msg: dict):
+        """Dispatch a TCP message to the appropriate node method."""
         msg_type = msg.get("type")
 
         if msg_type == "HELLO":
@@ -226,49 +243,57 @@ class TcpHandlerThread(threading.Thread):
 
 
 class HeartbeatThread(threading.Thread):
+    """Periodically sends heartbeat signals to all known peers."""
     def __init__(self, node: "Node"):
         super().__init__(daemon=True, name="Heartbeat")
         self.node = node
 
     def run(self):
+        """Loop to send heartbeats at the configured interval."""
         while not self.node.shutdown.wait(self.node.config.heartbeat_interval):
             self.node.send_heartbeat()
 
 
 class MonitorThread(threading.Thread):
+    """Monitors peer last-seen times and removes dead peers."""
     def __init__(self, node: "Node"):
         super().__init__(daemon=True, name="Monitor")
         self.node = node
 
     def run(self):
+        """Loop to check for timeouts at the configured interval."""
         while not self.node.shutdown.wait(self.node.config.heartbeat_interval):
             self.node.check_timeouts()
 
 
 class DiscoveryThread(threading.Thread):
+    """Periodically broadcasts JOIN messages to discover peers."""
     def __init__(self, node: "Node"):
         super().__init__(daemon=True, name="Discovery")
         self.node = node
 
     def run(self):
+        """Loop to broadcast discovery packets at the configured interval."""
         self.node.send_discover()
         while not self.node.shutdown.wait(self.node.config.discovery_interval):
             self.node.send_discover()
 
 
 class OutboxFlushThread(threading.Thread):
-    """Continuously tries to flush outbox with retry logic"""
+    """Continuously tries to flush buffered messages to the successor."""
     def __init__(self, node: "Node"):
         super().__init__(daemon=True, name="OutboxFlush")
         self.node = node
     
     def run(self):
+        """Retry loop to flush the outbox when connection is available."""
         while not self.node.shutdown.wait(0.5):  # Check every 500ms
             if self.node.outbox:
                 self.node._flush_outbox()
 
 
 class Node:
+    """Core P2P Node class managing discovery, ring topology, election, and chat."""
     def __init__(self, config: Config):
         self.config = config
         self.node_key = f"{config.advertise_host}:{config.tcp_port}"
@@ -306,6 +331,7 @@ class Node:
         self._load_chat_history()
 
     def start(self):
+        """Initialize all components and start background threads."""
         # Start all threads
         udp_thread = UdpThread(self)
         tcp_listener = TcpListenerThread(self)
@@ -336,6 +362,7 @@ class Node:
         election_thread.start()
 
     def stop(self):
+        """Gracefully shut down the node and all its threads."""
         self.logger.info("Shutting down...")
         self.send_leave()
         self.shutdown.set()
@@ -353,6 +380,7 @@ class Node:
                 t.join(timeout=2.0)
 
     def send_udp(self, payload: dict, target: Optional[Tuple[str, int]] = None):
+        """Send a UDP JSON packet to a specific target or broadcast it."""
         if not self.udp_sock:
             return
         try:
@@ -365,9 +393,11 @@ class Node:
             pass
 
     def send_discover(self):
+        """Broadcast a discovery message to find other peers."""
         self.send_udp({"type": "DISCOVER", "node_key": self.node_key})
 
     def send_join(self, target: Optional[Tuple[str, int]] = None):
+        """Announce presence to the network or a specific target."""
         payload = {
             "type": "JOIN",
             "node_key": self.node_key,
@@ -378,16 +408,19 @@ class Node:
         self.send_udp(payload, target)
 
     def send_leave(self):
+        """Broadcast a leave message before shutting down."""
         payload = {"type": "LEAVE", "node_key": self.node_key}
         self.logger.info("UDP LEAVE announce")
         self.send_udp(payload)
 
     def send_dead(self, node_key: str):
+        """Broadcast a dead node report to other peers."""
         payload = {"type": "DEAD", "node_key": node_key}
         self.logger.warning("UDP DEAD announce: %s", node_key)
         self.send_udp(payload)
 
     def send_heartbeat(self):
+        """Broadcast a heartbeat message to assert liveness."""
         payload = {
             "type": "HEARTBEAT",
             "node_key": self.node_key,
@@ -397,6 +430,7 @@ class Node:
         self.send_udp(payload)
 
     def add_peer(self, node_key: str, host: str, tcp_port: int):
+        """Register a new peer and update the ring topology."""
         with self.state_lock:
             self.peers[node_key] = PeerInfo(
                 node_key=node_key,
@@ -407,6 +441,7 @@ class Node:
         self.update_ring()
 
     def remove_peer(self, node_key: str, reason: str):
+        """Remove a peer and trigger re-election if it was the leader."""
         with self.state_lock:
             if node_key not in self.peers:
                 return
@@ -421,6 +456,7 @@ class Node:
             self.start_election()
 
     def check_timeouts(self):
+        """Check for expired peer heartbeats."""
         now = time.time()
         
         with self.state_lock:
@@ -436,6 +472,7 @@ class Node:
             self.send_dead(node_key)
 
     def update_ring(self):
+        """Recalculate successor/predecessor and handle connections."""
         with self.state_lock:
             members = sorted([self.node_key] + list(self.peers.keys()))
 
@@ -450,7 +487,7 @@ class Node:
             if new_successor != self.successor_key:
                 self.logger.info("Successor -> %s", new_successor)
                 self.successor_key = new_successor
-                needs_reconnect = True
+                needs_reconnect = True  # Flag to trigger new TCP connection
             else:
                 needs_reconnect = False
 
@@ -462,6 +499,7 @@ class Node:
             threading.Thread(target=self.connect_to_successor, daemon=True).start()
 
     def connect_to_successor(self):
+        """Establish a persistent TCP connection to the successor node."""
         with self.state_lock:
             successor_key = self.successor_key
             peer = self.peers.get(successor_key) if successor_key else None
@@ -488,7 +526,7 @@ class Node:
                 with self.sock_lock:
                     self.successor_sock = sock
 
-                # Send HELLO
+                # Send HELLO to identify self to the new successor
                 hello = {"type": "HELLO", "node_key": self.node_key}
                 self.send_to_successor(hello)
                 
@@ -503,13 +541,14 @@ class Node:
                 delay = min(delay * 2, self.config.reconnect_max)
 
     def send_to_successor(self, payload: dict) -> bool:
+        """Send a message to the successor via TCP, buffering if needed."""
         with self.state_lock:
             if self.successor_key == self.node_key:
-                return True
+                return True  # If we are the only node, no need to send
 
         with self.sock_lock:
             if not self.successor_sock:
-                # No connection - always buffer
+                # No active connection - buffer msg in outbox to send later
                 self.outbox.append(payload)
                 self.logger.debug("Buffered message in outbox (no connection)")
                 return False
@@ -541,13 +580,13 @@ class Node:
             flushed = 0
             failed = False
             
-            # Try to send all messages in outbox
+            # Try to send all messages in outbox in FIFO order
             while self.outbox and not failed:
-                payload = self.outbox[0]  # Peek first
+                payload = self.outbox[0]  # Peek first (don't remove yet)
                 try:
                     frame = frame_message(payload)
                     self.successor_sock.sendall(frame)
-                    self.outbox.popleft()  # Remove only if successful
+                    self.outbox.popleft()  # Remove only if send was successful
                     flushed += 1
                 except (OSError, ConnectionResetError) as exc:
                     # Failed - stop trying, connection is bad
@@ -563,6 +602,7 @@ class Node:
                 self.logger.info(f"Flushed {flushed} messages from outbox")
 
     def handle_chat(self, msg: dict):
+        """Process an incoming chat message and forward it if necessary."""
         msg_id = msg.get("msg_id")
         
         with self.state_lock:
@@ -586,6 +626,7 @@ class Node:
         self.send_to_successor(msg)
 
     def handle_election(self, msg: dict):
+        """Process an LCR election token and decide on candidacy."""
         candidate_key = msg.get("candidate_key")
         if not candidate_key:
             return
@@ -615,6 +656,7 @@ class Node:
             self.send_to_successor(msg)
 
     def handle_leader(self, msg: dict):
+        """Update local state with the newly elected leader."""
         leader_key = msg.get("leader_key")
         origin = msg.get("origin")
 
@@ -629,6 +671,7 @@ class Node:
             self.send_to_successor(msg)
 
     def start_election(self):
+        """Initiate a new leader election process."""
         with self.state_lock:
             if self.in_election:
                 return
@@ -641,6 +684,7 @@ class Node:
         })
 
     def send_chat(self, text: str):
+        """Create a new chat message and inject it into the ring."""
         with self.state_lock:
             self.seq += 1
             seq = self.seq
@@ -666,6 +710,7 @@ class Node:
         self.send_to_successor(payload)
 
     def _load_chat_history(self):
+        """Load persistent chat history from disk on startup."""
         if Path(self.history_file).exists():
             try:
                 with open(self.history_file, "r", encoding="utf-8") as f:
@@ -688,6 +733,7 @@ class Node:
                 self.logger.warning(f"Failed to load chat history: {e}")
 
     def _save_chat_history(self):
+        """Persist current chat history to a JSON file."""
         try:
             data = {
                 "node_key": self.node_key,
@@ -700,6 +746,7 @@ class Node:
             self.logger.warning(f"Failed to save chat history: {e}")
 
     def _save_chat_message(self, origin: str, seq: int, text: str, timestamp: float, is_own: bool):
+        """Append a message to the in-memory history and trigger save."""
         msg = {
             "origin": origin,
             "seq": seq,
@@ -713,6 +760,7 @@ class Node:
         self._save_chat_history()
 
     def _print_chat_message(self, origin: str, seq: int, text: str, timestamp: float, is_own: bool):
+        """Format and print a chat message to the console."""
         dt = datetime.fromtimestamp(timestamp)
         time_str = dt.strftime("%H:%M:%S")
 
@@ -722,6 +770,7 @@ class Node:
             print(f"{Colors.GRAY}[{time_str}]{Colors.RESET} {Colors.CYAN}[{origin}#{seq}]{Colors.RESET} {text}")
 
     def print_help(self):
+        """Display available CLI commands."""
         print("Commands:")
         print("  peers       - list known peers")
         print("  leader      - show leader")
@@ -731,6 +780,7 @@ class Node:
         print("  quit/exit   - shutdown")
 
     def print_peers(self):
+        """List all currently known peers and their status."""
         with self.state_lock:
             peers_copy = list(self.peers.values())
 
@@ -740,6 +790,7 @@ class Node:
             print(f"  {peer.node_key} (last {age:.1f}s)")
 
     def print_status(self):
+        """Show current node status including ring neighbors and leader."""
         with self.state_lock:
             print(f"Node: {self.node_key}")
             print(f"Leader: {self.leader_key}")
@@ -749,6 +800,7 @@ class Node:
 
 
 def build_config(args: argparse.Namespace, file_cfg: Optional[dict]) -> Config:
+    """Combine CLI arguments and file configuration into a Config object."""
     cfg = file_cfg or {}
     bind_host = args.bind_host or cfg.get("bind_host", "0.0.0.0")
     advertise_host = get_local_ip()
@@ -769,6 +821,7 @@ def build_config(args: argparse.Namespace, file_cfg: Optional[dict]) -> Config:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="P2P Ring Chat (LAN) - Threading Version")
     parser.add_argument("--config", help="Path to config JSON")
     parser.add_argument("--bind-host", help="Bind address")
@@ -785,6 +838,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
+    """Application entry point."""
     args = parse_args()
     file_cfg = load_config(args.config)
     config = build_config(args, file_cfg)

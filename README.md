@@ -1,39 +1,30 @@
-# P2P Ring Chat (LAN)
+# Resilient P2P Ring Chat System
 
-Einfache, stabile P2P-Chatapplikation im lokalen Netzwerk mit Ring-Topologie.
+A decentralized P2P chat app using a self-healing ring topology. Features automatic UDP discovery, LCR leader election, and fault tolerance via heartbeats. Includes reliable TCP messaging with an outbox retry mechanism.
 
-## Überblick
-- **Discovery** via UDP Broadcast (DISCOVER/JOIN).
-- **Ring** über TCP: jeder Node hält eine Verbindung zum Successor; der Predecessor verbindet sich inbound.
-- **Heartbeats** via UDP (HEARTBEAT), geplanter Exit via LEAVE.
-- **Leaderwahl** mittels LCR-Algorithmus (verzögert startbar).
-- **Nachrichten** mit 4-Byte Length-Header; Chatnachrichten enthalten Sequenznummern.
-- **FIFO-Queue** für Forwarding, falls Successor temporär nicht erreichbar ist.
-- **CLI** mit Statusanzeigen (Peer-Liste, Leader, Links, Verbindungsstatus).
+## Features
 
-## Start
+*   **Decentralized**: No central server.
+*   **Auto-Discovery**: Zero-configuration via UDP broadcasts.
+*   **Self-Healing**: Automatically detects and repairs node failures.
+*   **Reliable Messaging**: TCP-based ring with FIFO ordering and message buffering (Outbox).
+*   **Leader Election**: Uses LCR algorithm.
+*   **Multithreaded**: Non-blocking UI and network handling.
 
-### 1) Beispiel-Konfiguration
-Siehe [config.example.json](config.example.json).
+## Architecture
 
-### 2) Node starten
+*   **TCP**: Persistent ring connections (Chat, Election).
+*   **UDP**: Discovery and Heartbeats.
+
+## Usage
+
 ```bash
-python p2p_ring_chat.py --config config.example.json
+# Run a node
+python p2p_ring_chat.py --tcp-port 9000 --udp-port 9999
 ```
 
-Oder per CLI-Argumente:
-```bash
-python p2p_ring_chat.py --tcp-port 9001
-```
+**Commands:**
+*   `peers`, `links`, `leader`, `status`: View network state.
+*   `quit`: Shutdown.
+*   Type text to chat.
 
-## CLI-Kommandos
-- `peers` – bekannte Peers
-- `leader` – aktueller Leader
-- `links` – Successor/Predecessor
-- `status` – Kurzstatus
-- `send <msg>` – Chatnachricht senden
-- `quit` / `exit` – sauberer Shutdown
-
-## Hinweise
-- Ring-Ordnung ist deterministisch nach `IP:Port`.
-- Die lokale IP wird automatisch für die Peer-Ankündigung verwendet.
