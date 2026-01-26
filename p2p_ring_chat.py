@@ -332,6 +332,9 @@ class Node:
 
     def start(self):
         """Initialize all components and start background threads."""
+        # Initialize ring topology (self-loop by default)
+        self.update_ring()
+
         # Start all threads
         udp_thread = UdpThread(self)
         tcp_listener = TcpListenerThread(self)
@@ -675,6 +678,14 @@ class Node:
         with self.state_lock:
             if self.in_election:
                 return
+
+            # If we are the only node, we become leader immediately
+            if self.successor_key == self.node_key:
+                self.logger.info("Single node, electing self as leader")
+                self.leader_key = self.node_key
+                self.in_election = False
+                return
+
             self.in_election = True
 
         self.logger.info("Election started")
