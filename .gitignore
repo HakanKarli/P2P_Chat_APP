@@ -9,7 +9,7 @@ chat_history_*.json
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.txt
 # IDE
 .vscode/
 .idea/

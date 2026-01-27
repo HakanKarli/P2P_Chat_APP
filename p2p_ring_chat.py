@@ -121,7 +121,7 @@ class UdpThread(threading.Thread):
                 self._handle_message(msg, addr)
             except socket.timeout:
                 continue
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 continue
 
     def _handle_message(self, msg: dict, addr: Tuple[str, int]):
@@ -193,6 +193,15 @@ class TcpHandlerThread(threading.Thread):
                 msg = self._read_frame()
                 if msg is None:
                     break
+                
+                #Send ACK
+                try:
+                    ack_payload = {"type": "ACK"}
+                    ack_frame = frame_message(ack_payload)
+                    self.conn.sendall(ack_frame)
+                except OSError:
+                    break
+
                 self._handle_message(msg)
         except (socket.error, ConnectionResetError):
             pass
@@ -501,6 +510,36 @@ class Node:
         if needs_reconnect:
             threading.Thread(target=self.connect_to_successor, daemon=True).start()
 
+    def _send_and_wait_ack(self, sock: socket.socket, payload: dict) -> bool:
+        """Helper to send a frame and wait for an ACK response."""
+        try:
+            sock.settimeout(2.0)  # 2s timeout for ACK
+            
+            # 1. Send
+            frame = frame_message(payload)
+            sock.sendall(frame)
+            
+            # 2. Recv ACK
+            header = sock.recv(4)
+            if len(header) < 4:
+                return False
+            length = struct.unpack("!I", header)[0]
+            
+            # Safety limit for ACK
+            if length > 1024: 
+                return False
+                
+            data = b""
+            while len(data) < length:
+                chunk = sock.recv(min(4096, length - len(data)))
+                if not chunk:
+                    return False
+                data += chunk
+            
+            return True
+        except (OSError, socket.timeout):
+            return False
+
     def connect_to_successor(self):
         """Establish a persistent TCP connection to the successor node."""
         with self.state_lock:
@@ -556,13 +595,13 @@ class Node:
                 self.logger.debug("Buffered message in outbox (no connection)")
                 return False
 
-            try:
-                frame = frame_message(payload)
-                self.successor_sock.sendall(frame)
+            # Use reliable send with ACK
+            success = self._send_and_wait_ack(self.successor_sock, payload)
+            if success:
                 return True
-            except (OSError, ConnectionResetError) as exc:
-                # Send failed - buffer
-                self.logger.debug(f"Send failed, buffering: {exc}")
+            else:
+                # Send failed or no ACK - buffer
+                self.logger.debug(f"Send failed or no ACK, buffering")
                 self.outbox.append(payload)
                 # Socket is bad, close it
                 try:
@@ -586,14 +625,16 @@ class Node:
             # Try to send all messages in outbox in FIFO order
             while self.outbox and not failed:
                 payload = self.outbox[0]  # Peek first (don't remove yet)
-                try:
-                    frame = frame_message(payload)
-                    self.successor_sock.sendall(frame)
+                
+                # Use reliable send with ACK
+                success = self._send_and_wait_ack(self.successor_sock, payload)
+                
+                if success:
                     self.outbox.popleft()  # Remove only if send was successful
                     flushed += 1
-                except (OSError, ConnectionResetError) as exc:
+                else:
                     # Failed - stop trying, connection is bad
-                    self.logger.debug(f"Flush failed: {exc}")
+                    self.logger.debug(f"Flush failed or no ACK")
                     try:
                         self.successor_sock.close()
                     except:
@@ -617,16 +658,32 @@ class Node:
                     self.seen_messages = set(list(self.seen_messages)[-1000:])
 
         origin = msg.get("origin")
+        target = msg.get("target")  # New: Target node key (optional)
         seq = msg.get("seq")
         text = msg.get("text")
         timestamp = msg.get("timestamp", time.time())
 
-        if text is not None:
-            self.logger.info("CHAT recv msg_id=%s origin=%s seq=%s", msg_id, origin, seq)
-            self._save_chat_message(origin, seq, text, timestamp, is_own=False)
-            self._print_chat_message(origin, seq, text, timestamp, is_own=False)
+        # Logic for display:
+        # Show if (Broadcast) OR (I am target) OR (I am sender - loopback)
+        is_for_me = (target is None) or (target == self.node_key) or (origin == self.node_key)
 
-        self.send_to_successor(msg)
+        if text is not None and is_for_me:
+            # Add [PRIV] prefix for logging/display
+            clean_text = text
+            if target:
+                if origin == self.node_key:
+                    clean_text = f"[TO {target}] {text}"
+                else:
+                    clean_text = f"[PRIV] {text}"
+            
+            self.logger.info("CHAT recv msg_id=%s origin=%s seq=%s text='%s'", msg_id, origin, seq, clean_text)
+            self._save_chat_message(origin, seq, clean_text, timestamp, is_own=False)
+            self._print_chat_message(origin, seq, clean_text, timestamp, is_own=False)
+
+        # Forwarding Logic:
+        # Always forward unless I am the sender (message completed full loop)
+        if origin != self.node_key:
+            self.send_to_successor(msg)
 
     def handle_election(self, msg: dict):
         """Process an LCR election token and decide on candidacy."""
@@ -694,7 +751,7 @@ class Node:
             "candidate_key": self.node_key,
         })
 
-    def send_chat(self, text: str):
+    def send_chat(self, text: str, target: Optional[str] = None):
         """Create a new chat message and inject it into the ring."""
         with self.state_lock:
             self.seq += 1
@@ -706,6 +763,7 @@ class Node:
         payload = {
             "type": "CHAT",
             "origin": self.node_key,
+            "target": target,  # New: Target field
             "seq": seq,
             "msg_id": msg_id,
             "text": text,
@@ -715,9 +773,13 @@ class Node:
         with self.state_lock:
             self.seen_messages.add(msg_id)
 
-        self.logger.info("CHAT send msg_id=%s", msg_id)
-        self._save_chat_message(self.node_key, seq, text, timestamp, is_own=True)
-        self._print_chat_message(self.node_key, seq, text, timestamp, is_own=True)
+        display_text = text
+        if target:
+            display_text = f"[TO {target}] {text}"
+
+        self.logger.info("CHAT send msg_id=%s text='%s'", msg_id, display_text)
+        self._save_chat_message(self.node_key, seq, display_text, timestamp, is_own=True)
+        self._print_chat_message(self.node_key, seq, display_text, timestamp, is_own=True)
         self.send_to_successor(payload)
 
     def _load_chat_history(self):
@@ -783,12 +845,13 @@ class Node:
     def print_help(self):
         """Display available CLI commands."""
         print("Commands:")
-        print("  peers       - list known peers")
-        print("  leader      - show leader")
-        print("  links       - show successor/predecessor")
-        print("  status      - summary")
-        print("  send <msg>  - send chat message")
-        print("  quit/exit   - shutdown")
+        print("  peers          - list known peers")
+        print("  leader         - show leader")
+        print("  links          - show successor/predecessor")
+        print("  status         - summary")
+        print("  send <msg>     - send chat message")
+        print("  msg <ip> <txt> - send private message")
+        print("  quit/exit      - shutdown")
 
     def print_peers(self):
         """List all currently known peers and their status."""
@@ -899,6 +962,14 @@ def main():
                 text = line[5:].strip()
                 if text:
                     node.send_chat(text)
+            elif line.startswith("msg "):
+                # Format: msg <target_key> <text>
+                parts = line[4:].split(" ", 1)
+                if len(parts) == 2:
+                    target_key, text = parts
+                    node.send_chat(text, target=target_key)
+                else:
+                    print("Usage: msg <target_key> <text>")
             else:
                 print("Unknown command. Type 'help'.")
 
